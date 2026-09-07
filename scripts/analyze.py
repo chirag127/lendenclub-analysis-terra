@@ -26,6 +26,18 @@ def band(score):
     return 'Unknown'
 def safe(n, d): return round(n / d, 4) if d else 0
 def money(n): return round(n, 2)
+def xirr(flows):
+    """Annual IRR from dated aggregate cash flows; returns a percentage or None."""
+    if not flows or not any(v < 0 for _,v in flows) or not any(v > 0 for _,v in flows): return None
+    start = min(d for d,_ in flows)
+    def npv(rate): return sum(v / (1 + rate) ** ((d-start).days / 365) for d,v in flows)
+    low, high = -.999, 1000.0
+    if npv(low) * npv(high) > 0: return None
+    for _ in range(120):
+        mid = (low + high) / 2
+        if npv(low) * npv(mid) <= 0: high = mid
+        else: low = mid
+    return round(mid * 100, 2)
 
 def read(path):
     sheet = openpyxl.load_workbook(path, read_only=True, data_only=True).active
@@ -35,6 +47,7 @@ def read(path):
         x = dict(zip(FIELDS, values))
         for key in ('amount','received','principal','interest','reported_fee','npa','dpd','rate','tenure','score'): x[key] = num(x[key])
         x['date'] = date(x['date']); x['status'] = str(x['status'] or '').upper(); x['band'] = band(x['score'])
+        x['close_date'] = date(x['close_date'])
         x['fee'] = x['principal'] * fee_rate(x['tenure'], x['date'])
         x['default_loss'] = max(0, x['amount'] - x['principal']) if x['status'] in ('CLOSED','NPA') or x['npa'] else 0
         x['net_income'] = x['interest'] - x['fee'] - x['default_loss']
@@ -47,6 +60,13 @@ def aggregate(rows, label):
     out['net_per_1000'] = round(safe(out['net'],out['lent'])*1000,1); out['net_roi'] = round(safe(out['net'],out['lent'])*100,2)
     out['default_rate'] = round(safe(sum(1 for x in rows if x['default_loss'] > 0),len(rows))*100,2)
     out['mean_rate'] = round(safe(sum(x['rate'] for x in rows),len(rows)),2)
+    flows = []
+    for x in rows:
+        end = x['close_date'] or x['date']
+        cash = x['principal'] + x['interest'] - x['fee']
+        if x['date'] and end and end > x['date'] and cash > 0:
+            flows.extend([(x['date'], -x['amount']), (end, cash)])
+    out['annual_xirr'] = xirr(flows)
     return out
 
 def build(rows):
@@ -63,7 +83,7 @@ def build(rows):
     by_tenure = [aggregate([x for x in completed if x['tenure']==t], f'{t} months') | {'tenure':t} for t in sorted(set(x['tenure'] for x in completed))]
     by_band = [aggregate([x for x in completed if x['band']==b], b) | {'band':b} for b in [f'{a}+' if z==999 else f'{a}–{z}' for a,z in BANDS]]
     chart_specs = []
-    metrics = [('net_per_1000','Net ₹ / ₹1,000'),('net_roi','Net ROI %'),('default_rate','Default rate %'),('loans','Completed loans'),('mean_rate','Quoted rate %')]
+    metrics = [('annual_xirr','Annualised net XIRR %'),('net_per_1000','Net ₹ / ₹1,000'),('net_roi','Net ROI %'),('default_rate','Default rate %'),('loans','Completed loans'),('mean_rate','Quoted rate %')]
     dimensions = [('Tenure',by_tenure),('Score band',by_band),('Verdict cell',list(groups.values()))]
     for dimension, data in dimensions:
         for metric, title in metrics:
